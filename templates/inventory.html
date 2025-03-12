@@ -3,38 +3,40 @@
 {% block title %}Inventory{% endblock %}
 
 {% block content %}
-<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-    <h1 class="h2">Inventory</h1>
-    <div class="btn-toolbar mb-2 mb-md-0">
-        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addItemModal">
-            <i data-lucide="plus" class="icon me-1"></i>
-            Add Item
-        </button>
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2>Inventory Management</h2>
+    <div>
+        <div class="btn-toolbar mb-2 mb-md-0">
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addItemModal">
+                <i data-lucide="plus" class="icon me-1"></i>
+                Add Item
+            </button>
+        </div>
     </div>
 </div>
 
 <div id="alertContainer"></div>
 
 <div class="table-responsive">
-    <table class="table table-striped table-sm">
+    <table class="table align-middle">
         <thead>
             <tr>
-                <th>ID</th>
-                <th>Name</th>
-                <th>Category</th>
-                <th>Quantity</th>
-                <th>Price</th>
-                <th>Expiry Date</th>
-                <th>Date Added</th>
-                <th>Actions</th>
+                <th scope="col">#</th>
+                <th scope="col">Item Name</th>
+                <th scope="col">Category</th>
+                <th scope="col">Quantity</th>
+                <th scope="col">Price</th>
+                <th scope="col">Expiry Date</th>
+                <th scope="col">Date Added</th>
+                <th scope="col">Actions</th>
             </tr>
         </thead>
         <tbody>
-            {% for item in inventory %}
+            {% for item in items %}
             <tr>
                 <td>#{{ "%04d" | format(loop.index) }}</td>
                 <td>{{ item.name }}</td>
-                <td>{{ item.category }}</td>
+                <td>{{ item.category_name or 'Uncategorized' }}</td>
                 <td>{{ item.quantity }}</td>
                 <td>₹{{ "{:,.2f}".format(item.price) }}</td>
                 <td>{{ item.expiry_date if item.expiry_date else 'N/A' }}</td>
@@ -55,9 +57,9 @@
                 </td>
             </tr>
             {% endfor %}
-            {% if not inventory %}
+            {% if not items %}
             <tr>
-                <td colspan="6" class="text-center text-muted py-4">
+                <td colspan="7" class="text-center text-muted py-4">
                     No items in inventory
                 </td>
             </tr>
@@ -67,39 +69,38 @@
 </div>
 
 <!-- Add Item Modal -->
-<div class="modal fade" id="addItemModal" tabindex="-1" aria-labelledby="addItemModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
+<div class="modal fade" id="addItemModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
-            <div class="modal-header border-0">
-                <h5 class="modal-title fw-semibold" id="addItemModalLabel">Add New Item</h5>
+            <div class="modal-header">
+                <h5 class="modal-title">Add New Item</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
-                <form id="addItemForm">
-                    <div class="mb-4">
-                        <label for="name" class="form-label text-secondary">Item Name</label>
-                        <select class="form-select" id="name" name="name" required>
-                            <option value="">Select an item or add new</option>
-                            {% for item in inventory %}
-                            <option value="{{ item.name }}">{{ item.name }}</option>
-                            {% endfor %}
-                            <option value="new">Add New Item</option>
-                        </select>
-                        <input type="text" class="form-control mt-2" id="newItemName" name="newItemName" 
-                               style="display: none;" placeholder="Enter new item name">
+            <form id="addItemForm" method="post" action="/add_item">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="name" class="form-label">Item Name <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="name" name="name" required>
                     </div>
 
                     <div class="mb-4">
-                        <label for="category" class="form-label text-secondary">Category</label>
-                        <select class="form-select" id="category" name="category" required>
-                            <option value="">Select a category or add new</option>
-                            {% for category in categories %}
-                            <option value="{{ category }}">{{ category }}</option>
-                            {% endfor %}
-                            <option value="new">Add New Category</option>
-                        </select>
-                        <input type="text" class="form-control mt-2" id="newCategory" name="newCategory" 
-                               style="display: none;" placeholder="Enter new category">
+                        <label for="category_id" class="form-label text-secondary">Category</label>
+                        <div class="input-group">
+                            <select class="form-select" id="category_id" name="category_id" onchange="categoryChanged(this)">
+                                <option value="">Uncategorized</option>
+                                {% for category in categories %}
+                                <option value="{{ category.id }}">{{ category.name }}</option>
+                                {% endfor %}
+                                <option value="new" class="text-primary">+ Add New Category</option>
+                            </select>
+                        </div>
+                        <div id="new_category_container" class="mt-2" style="display: none;">
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="new_category_name" name="new_category_name" placeholder="Enter new category name">
+                                <button class="btn btn-primary" type="button" onclick="saveNewCategory()">Add</button>
+                                <button class="btn btn-outline-secondary" type="button" onclick="cancelNewCategory()">Cancel</button>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="row g-3 mb-4">
@@ -120,12 +121,12 @@
                         <label for="expiry_date" class="form-label text-secondary">Expiry Date (optional)</label>
                         <input type="date" class="form-control" id="expiry_date" name="expiry_date">
                     </div>
-
-                    <div class="d-grid">
-                        <button type="submit" class="btn btn-primary py-2">Add Item</button>
-                    </div>
-                </form>
-            </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Item</button>
+                </div>
+            </form>
         </div>
     </div>
 </div>
@@ -217,6 +218,85 @@
                         Yes, Delete
                     </button>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Update the view item modal -->
+<div class="modal fade" id="viewItemModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Item Details</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Name:</div>
+                    <div class="col-7" id="viewName"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Description:</div>
+                    <div class="col-7" id="viewDescription"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Category:</div>
+                    <div class="col-7" id="viewCategory"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Quantity:</div>
+                    <div class="col-7" id="viewQuantity"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Price:</div>
+                    <div class="col-7" id="viewPrice"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Cost:</div>
+                    <div class="col-7" id="viewCost"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">SKU:</div>
+                    <div class="col-7" id="viewSku"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Barcode:</div>
+                    <div class="col-7" id="viewBarcode"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Min Stock:</div>
+                    <div class="col-7" id="viewMinStock"></div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-5 fw-medium">Max Stock:</div>
+                    <div class="col-7" id="viewMaxStock"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-light" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add this small modal for quick category creation -->
+<div class="modal fade" id="quickCategoryModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">New Category</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="quickCategoryName" class="form-label">Category Name</label>
+                    <input type="text" class="form-control" id="quickCategoryName">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="saveQuickCategory">Save</button>
             </div>
         </div>
     </div>
@@ -479,6 +559,463 @@ function formatIndianCurrency(price) {
 document.addEventListener('DOMContentLoaded', function() {
     lucide.createIcons();
 });
+
+// Update the view item function
+function viewItem(itemId) {
+    fetch(`/get_item/${itemId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const item = data.item;
+                document.getElementById('viewName').textContent = item.name || 'N/A';
+                document.getElementById('viewDescription').textContent = item.description || 'N/A';
+                document.getElementById('viewCategory').textContent = item.category_name || 'Uncategorized';
+                document.getElementById('viewQuantity').textContent = item.quantity || '0';
+                document.getElementById('viewPrice').textContent = `₹${parseFloat(item.price).toFixed(2)}`;
+                document.getElementById('viewCost').textContent = item.cost ? `₹${parseFloat(item.cost).toFixed(2)}` : 'N/A';
+                document.getElementById('viewSku').textContent = item.sku || 'N/A';
+                document.getElementById('viewBarcode').textContent = item.barcode || 'N/A';
+                document.getElementById('viewMinStock').textContent = item.min_stock || '0';
+                document.getElementById('viewMaxStock').textContent = item.max_stock || 'N/A';
+                
+                const viewModal = new bootstrap.Modal(document.getElementById('viewItemModal'));
+                viewModal.show();
+            } else {
+                showAlert('error', data.message || 'Failed to load item details');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('error', 'An error occurred while loading item details');
+        });
+}
+
+// Make sure view buttons work
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.view-item').forEach(button => {
+        button.addEventListener('click', function() {
+            const itemId = this.getAttribute('data-id');
+            viewItem(itemId);
+        });
+    });
+});
+
+document.getElementById('addCategoryForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    const categoryName = document.getElementById('newCategoryName').value.trim();
+    
+    if (!categoryName) {
+        showAlert('danger', 'Please enter a category name');
+        return;
+    }
+    
+    // Create form data
+    const formData = new FormData();
+    formData.append('name', categoryName);
+    
+    // Send request to add category
+    fetch('/add_category', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Clear input
+            document.getElementById('newCategoryName').value = '';
+            
+            // Add to the list
+            const categoriesList = document.getElementById('categoriesList');
+            
+            // Remove "no categories" message if it exists
+            const noCategories = categoriesList.querySelector('.text-muted.text-center');
+            if (noCategories) {
+                noCategories.remove();
+            }
+            
+            // Create new list item
+            const newItem = document.createElement('li');
+            newItem.className = 'list-group-item d-flex justify-content-between align-items-center';
+            newItem.innerHTML = `
+                ${categoryName}
+                <button class="btn btn-sm btn-outline-danger delete-category" data-id="${data.id}">
+                    <i data-lucide="trash-2" style="width: 16px; height: 16px;"></i>
+                </button>
+            `;
+            categoriesList.appendChild(newItem);
+            
+            // Update category dropdowns in both add and edit modals
+            const addDropdown = document.getElementById('category');
+            const editDropdown = document.getElementById('editItemCategory');
+            
+            // Add to "Add Item" modal dropdown
+            const newOption = document.createElement('option');
+            newOption.value = categoryName;
+            newOption.textContent = categoryName;
+            
+            // Insert before the "Add New" option
+            const addNewOption = Array.from(addDropdown.options).find(opt => opt.value === 'new');
+            addDropdown.insertBefore(newOption, addNewOption);
+            
+            // Add to "Edit Item" modal dropdown
+            const editOption = document.createElement('option');
+            editOption.value = categoryName;
+            editOption.textContent = categoryName;
+            editDropdown.appendChild(editOption);
+            
+            // Initialize the delete button on the new item
+            setupDeleteCategoryHandlers();
+            
+            // Initialize Lucide icons
+            lucide.createIcons();
+            
+            showAlert('success', 'Category added successfully');
+        } else {
+            showAlert('danger', data.message || 'Failed to add category');
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showAlert('danger', 'An error occurred while adding the category');
+    });
+});
+
+// Set up delete category handlers
+function setupDeleteCategoryHandlers() {
+    document.querySelectorAll('.delete-category').forEach(button => {
+        button.onclick = function() {
+            if (confirm('Are you sure you want to delete this category?')) {
+                const categoryId = this.getAttribute('data-id');
+                const listItem = this.closest('li');
+                const categoryName = listItem.textContent.trim();
+                
+                fetch(`/delete_category/${categoryId}`, {
+                    method: 'POST'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Remove from list
+                        listItem.remove();
+                        
+                        // Remove from dropdowns
+                        const addDropdown = document.getElementById('category');
+                        const editDropdown = document.getElementById('editItemCategory');
+                        
+                        Array.from(addDropdown.options).forEach(option => {
+                            if (option.value === categoryName) {
+                                option.remove();
+                            }
+                        });
+                        
+                        Array.from(editDropdown.options).forEach(option => {
+                            if (option.value === categoryName) {
+                                option.remove();
+                            }
+                        });
+                        
+                        // Show alert
+                        showAlert('success', 'Category deleted successfully');
+                        
+                        // If no categories left, add the "no categories" message
+                        const categoriesList = document.getElementById('categoriesList');
+                        if (categoriesList.children.length === 0) {
+                            const noCategories = document.createElement('li');
+                            noCategories.className = 'list-group-item text-muted text-center';
+                            noCategories.textContent = 'No categories found';
+                            categoriesList.appendChild(noCategories);
+                        }
+                    } else {
+                        showAlert('danger', data.message || 'Failed to delete category');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    showAlert('danger', 'An error occurred while deleting the category');
+                });
+            }
+        };
+    });
+}
+
+// Initialize delete category handlers
+document.addEventListener('DOMContentLoaded', function() {
+    setupDeleteCategoryHandlers();
+});
+
+// Add this to your existing JavaScript code
+document.addEventListener('DOMContentLoaded', function() {
+    // Category dropdown change event
+    document.getElementById('category_id').addEventListener('change', function() {
+        if (this.value === 'new') {
+            document.getElementById('new_category_container').style.display = 'block';
+            setTimeout(function() {
+                document.getElementById('new_category_name').focus();
+            }, 100); // Small delay to ensure DOM is updated
+        } else {
+            document.getElementById('new_category_container').style.display = 'none';
+        }
+    });
+
+    // Cancel new category
+    document.getElementById('cancel_new_category').addEventListener('click', function() {
+        document.getElementById('new_category_container').style.display = 'none';
+        document.getElementById('category_id').value = '';
+        document.getElementById('new_category_name').value = '';
+    });
+
+    // Save new category
+    document.getElementById('save_new_category').addEventListener('click', function() {
+        const categoryName = document.getElementById('new_category_name').value.trim();
+        
+        if (!categoryName) {
+            showAlert('danger', 'Please enter a category name');
+            return;
+        }
+        
+        // Create a simple XMLHttpRequest (more compatible than fetch)
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/add_category', true);
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+        
+        xhr.onload = function() {
+            if (xhr.status === 200) {
+                try {
+                    const data = JSON.parse(xhr.responseText);
+                    if (data.success) {
+                        // Add new option to dropdown
+                        const select = document.getElementById('category_id');
+                        const option = document.createElement('option');
+                        option.value = data.id;
+                        option.textContent = categoryName;
+                        
+                        // Insert before the "Add New Category" option
+                        select.insertBefore(option, select.lastChild);
+                        
+                        // Select the new category
+                        select.value = data.id;
+                        
+                        // Hide the new category input
+                        document.getElementById('new_category_container').style.display = 'none';
+                        document.getElementById('new_category_name').value = '';
+                        
+                        showAlert('success', 'Category added successfully');
+                    } else {
+                        showAlert('danger', data.message || 'Failed to add category');
+                    }
+                } catch (e) {
+                    alert('Error processing response');
+                    console.error(e);
+                }
+            } else {
+                alert('Request failed. Status: ' + xhr.status);
+            }
+        };
+        
+        xhr.onerror = function() {
+            alert('Request failed. Network error.');
+        };
+        
+        xhr.send('name=' + encodeURIComponent(categoryName));
+    });
+
+    // Allow pressing Enter in the new category input
+    document.getElementById('new_category_name').addEventListener('keyup', function(event) {
+        if (event.key === 'Enter') {
+            document.getElementById('save_new_category').click();
+        }
+    });
+});
+
+// Handle category selection/typing
+document.getElementById('category').addEventListener('input', function() {
+    const categoryName = this.value.trim();
+    const categoryIdField = document.getElementById('category_id');
+    
+    // Try to find matching category in the datalist
+    const options = document.getElementById('category-options').getElementsByTagName('option');
+    let found = false;
+    
+    for (let i = 0; i < options.length; i++) {
+        if (options[i].value === categoryName) {
+            categoryIdField.value = options[i].getAttribute('data-id');
+            found = true;
+            break;
+        }
+    }
+    
+    // If no existing category matched, prepare to create a new one
+    if (!found) {
+        categoryIdField.value = 'new:' + categoryName;
+    }
+});
+
+// Modify the form submission to handle new categories
+const addItemForm = document.getElementById('addItemForm');
+const originalSubmitHandler = addItemForm.onsubmit;
+
+addItemForm.onsubmit = function(e) {
+    // Check if we need to create a new category
+    const categoryIdField = document.getElementById('category_id');
+    const categoryValue = categoryIdField.value;
+    
+    if (categoryValue && categoryValue.startsWith('new:')) {
+        e.preventDefault(); // Prevent the original form submission
+        
+        // Extract the new category name
+        const newCategoryName = categoryValue.substring(4);
+        
+        // Create the new category first
+        fetch('/add_category', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'name=' + encodeURIComponent(newCategoryName)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Update the category ID with the new ID
+                categoryIdField.value = data.id;
+                
+                // Now submit the form
+                if (typeof confirmItemModal !== 'undefined') {
+                    // If using confirmation modal
+                    confirmItemModal.show();
+                } else {
+                    // Direct form submission
+                    const formData = new FormData(addItemForm);
+                    
+                    fetch('/add_item', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            location.reload();
+                        } else {
+                            alert('Error: ' + (data.error || 'Failed to add item'));
+                        }
+                    });
+                }
+            } else {
+                alert('Failed to create category: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('An error occurred while creating the category');
+        });
+        
+        return false; // Prevent original form submission
+    }
+    
+    // If we're not creating a new category, proceed with original submit logic
+    if (originalSubmitHandler) {
+        return originalSubmitHandler.call(this, e);
+    }
+    return true;
+};
+</script>
+
+<!-- Add this right before the closing </body> tag -->
+<script type="text/javascript">
+// Simple inline functions to avoid any conflicts or timing issues
+function categoryChanged(selectElement) {
+    if (selectElement.value === 'new') {
+        document.getElementById('new_category_container').style.display = 'block';
+        setTimeout(function() {
+            document.getElementById('new_category_name').focus();
+        }, 100); // Small delay to ensure DOM is updated
+    } else {
+        document.getElementById('new_category_container').style.display = 'none';
+    }
+}
+
+function cancelNewCategory() {
+    document.getElementById('new_category_container').style.display = 'none';
+    document.getElementById('category_id').value = '';
+}
+
+function saveNewCategory() {
+    var categoryName = document.getElementById('new_category_name').value.trim();
+    
+    if (!categoryName) {
+        alert('Please enter a category name');
+        return;
+    }
+    
+    // Create form data for the request
+    var formData = new FormData();
+    formData.append('name', categoryName);
+    
+    // Make AJAX request using XMLHttpRequest
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/add_category');
+    
+    xhr.onload = function() {
+        if (xhr.status === 200) {
+            var response = JSON.parse(xhr.responseText);
+            if (response.success) {
+                // Add new option to dropdown
+                var select = document.getElementById('category_id');
+                var newOption = document.createElement('option');
+                newOption.value = response.id;
+                newOption.text = categoryName;
+                
+                // Add before the "+ Add New" option
+                select.insertBefore(newOption, select.options[select.options.length - 1]);
+                
+                // Select the new option
+                select.value = response.id;
+                
+                // Hide the new category inputs
+                document.getElementById('new_category_container').style.display = 'none';
+                document.getElementById('new_category_name').value = '';
+                
+                alert('Category added successfully');
+            } else {
+                alert(response.message || 'Error adding category');
+            }
+        } else {
+            alert('Error adding category');
+        }
+    };
+    
+    xhr.onerror = function() {
+        alert('Network error occurred');
+    };
+    
+    xhr.send(formData);
+}
+
+// When the page loads, check if the input elements for category exist
+window.onload = function() {
+    var categorySelect = document.getElementById('category_id');
+    var newCategoryInput = document.getElementById('new_category_name');
+    
+    if (!categorySelect) {
+        console.error("Category select element not found");
+    }
+    
+    if (!newCategoryInput) {
+        console.error("New category input not found");
+    }
+    
+    // Add event listener for Enter key
+    if (newCategoryInput) {
+        newCategoryInput.addEventListener('keyup', function(event) {
+            if (event.key === 'Enter') {
+                saveNewCategory();
+            }
+        });
+    }
+    
+    console.log("Category management code initialized");
+};
 </script>
 {% endblock %}
 

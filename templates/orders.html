@@ -58,57 +58,46 @@
 
 <!-- Add Order Modal -->
 <div class="modal fade" id="addOrderModal" tabindex="-1" aria-labelledby="addOrderModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
+    <div class="modal-dialog modal-lg">
         <div class="modal-content">
-            <div class="modal-header border-0">
-                <h5 class="modal-title fw-semibold" id="addOrderModalLabel">Add New Order</h5>
+            <div class="modal-header">
+                <h5 class="modal-title" id="addOrderModalLabel">Create New Order</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
-                <form id="addOrderForm">
-                    <div class="mb-4">
-                        <label for="customer" class="form-label text-secondary">Customer Name</label>
-                        <input type="text" class="form-control" id="customer" name="customer" required 
-                               placeholder="Enter customer name">
+                <form id="createOrderForm">
+                    <div class="mb-3">
+                        <label for="customer" class="form-label">Customer Name</label>
+                        <input type="text" class="form-control" id="customer" placeholder="Walk-in Customer">
                     </div>
-
-                    <div id="itemsContainer">
-                        <div class="card mb-3 border-0 bg-light">
-                            <div class="card-body">
-                                <div class="row g-3">
-                                    <div class="col-md-8">
-                                        <label class="form-label text-secondary">Item</label>
-                                        <select class="form-select" name="items" required onchange="checkInventory(this)">
-                                            <option value="">Select an item</option>
-                                            {% for item in inventory %}
-                                            <option value="{{ item.name }}" 
-                                                    data-price="{{ item.price }}"
-                                                    data-stock="{{ item.quantity }}">
-                                                {{ item.name }} - ₹{{ "{:,.2f}".format(item.price) }} 
-                                                ({{ item.quantity }} in stock)
-                                            </option>
-                                            {% endfor %}
-                                        </select>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <label class="form-label text-secondary">Quantity</label>
-                                        <input type="number" class="form-control" name="quantities" required min="1" 
-                                               onchange="checkInventory(this.closest('.card-body').querySelector('select[name=items]'))">
-                                        <small class="text-muted stock-message"></small>
-                                    </div>
-                                </div>
+                    
+                    <h6>Select Items</h6>
+                    <div id="order_items_container" class="mb-3">
+                        <!-- Items will be loaded here via JavaScript -->
+                        <div class="text-center">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
                             </div>
                         </div>
                     </div>
-
-                    <div class="d-flex gap-2 mb-4">
-                        <button type="button" class="btn btn-light" id="addItemBtn">
-                            <i data-lucide="plus" class="icon-sm me-1"></i> Add Another Item
-                        </button>
+                    
+                    <div class="card mb-3">
+                        <div class="card-header">Order Summary</div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-6">Total Items:</div>
+                                <div class="col-6 text-end" id="total_items">0</div>
+                            </div>
+                            <div class="row">
+                                <div class="col-6">Total Amount:</div>
+                                <div class="col-6 text-end" id="total_amount">0.00</div>
+                            </div>
+                            <input type="hidden" id="order_total" name="amount" value="0">
+                        </div>
                     </div>
-
+                    
                     <div class="d-grid">
-                        <button type="submit" class="btn btn-primary py-2">Create Order</button>
+                        <button type="submit" class="btn btn-primary">Create Order</button>
                     </div>
                 </form>
             </div>
@@ -301,66 +290,273 @@
 
 {% block scripts %}
 <script>
+// Fetch inventory items when the add order modal is opened
 document.addEventListener('DOMContentLoaded', function() {
-    const addOrderForm = document.getElementById('addOrderForm');
-    const confirmOrderModal = new bootstrap.Modal(document.getElementById('confirmOrderModal'));
+    console.log("DOM loaded, setting up order functionality");
     
-    addOrderForm.addEventListener('submit', function(e) {
-        e.preventDefault();
-        confirmOrderModal.show();
-    });
-
-    document.getElementById('confirmAddOrder').addEventListener('click', function() {
-        const formData = new FormData(addOrderForm);
-        
-        // Check inventory before submitting
-        let inventoryValid = true;
-        document.querySelectorAll('.order-item').forEach(item => {
-            const select = item.querySelector('select[name="item_name[]"]');
-            const quantity = parseInt(item.querySelector('input[name="quantity[]"]').value);
-            const availableStock = parseInt(select.options[select.selectedIndex].dataset.stock);
-            
-            if (quantity > availableStock) {
-                inventoryValid = false;
-                showAlert('danger', `Not enough inventory for ${select.value}. Only ${availableStock} available.`);
-            }
+    // Get the modal element
+    const addOrderModal = document.getElementById('addOrderModal');
+    
+    // Add an event listener for when the modal is shown
+    if (addOrderModal) {
+        console.log("Found addOrderModal, adding event listener");
+        addOrderModal.addEventListener('shown.bs.modal', function() {
+            console.log("Modal shown, fetching inventory items");
+            fetchInventoryItems();
         });
-        
-        if (!inventoryValid) {
+    } else {
+        console.error("addOrderModal not found in the document");
+    }
+    
+    // Function to fetch inventory items
+    function fetchInventoryItems() {
+        const itemsContainer = document.getElementById('order_items_container');
+        if (!itemsContainer) {
+            console.error("order_items_container not found");
             return;
         }
         
-        // Add items data
-        const items = [];
-        document.querySelectorAll('.order-item').forEach(item => {
-            items.push({
-                name: item.querySelector('select[name="item_name[]"]').value,
-                quantity: parseFloat(item.querySelector('input[name="quantity[]"]').value),
-                price: parseFloat(item.querySelector('input[name="price[]"]').value)
-            });
-        });
-        formData.append('items', JSON.stringify(items));
+        // Show loading indicator
+        itemsContainer.innerHTML = `
+            <div class="text-center p-3">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-2">Loading inventory items...</p>
+            </div>
+        `;
         
-        fetch('/add_order', {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                confirmOrderModal.hide();
-                bootstrap.Modal.getInstance(document.getElementById('addOrderModal')).hide();
-                addOrderForm.reset();
-                location.reload();
+        console.log("Sending request to /get_inventory_items");
+        
+        // Use XMLHttpRequest for better compatibility
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/get_inventory_items', true);
+        
+        xhr.onload = function() {
+            if (xhr.status === 200) {
+                console.log("Received response from server");
+                try {
+                    const data = JSON.parse(xhr.responseText);
+                    console.log(`Parsed JSON data, success: ${data.success}, items count: ${data.items ? data.items.length : 'undefined'}`);
+                    
+                    if (data.success) {
+                        // Check if there are items
+                        if (!data.items || data.items.length === 0) {
+                            itemsContainer.innerHTML = '<div class="alert alert-info">No inventory items available. Please add items to your inventory first.</div>';
+                            return;
+                        }
+                        
+                        // Create a table to display items
+                        let tableHTML = `
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Select</th>
+                                        <th>Item</th>
+                                        <th>Category</th>
+                                        <th>Available</th>
+                                        <th>Price</th>
+                                        <th>Quantity</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                        `;
+                        
+                        // Add each item to the table
+                        data.items.forEach(item => {
+                            tableHTML += `
+                                <tr>
+                                    <td>
+                                        <input type="checkbox" class="form-check-input select-item" 
+                                               data-id="${item.id}" 
+                                               data-name="${item.name}" 
+                                               data-price="${item.price}" 
+                                               data-max="${item.quantity}">
+                                    </td>
+                                    <td>${item.name}</td>
+                                    <td>${item.category_name || 'Uncategorized'}</td>
+                                    <td>${item.quantity}</td>
+                                    <td>${item.price}</td>
+                                    <td>
+                                        <input type="number" class="form-control form-control-sm item-quantity" 
+                                               min="1" max="${item.quantity}" value="1" disabled
+                                               data-id="${item.id}">
+                                    </td>
+                                </tr>
+                            `;
+                        });
+                        
+                        tableHTML += `
+                                </tbody>
+                            </table>
+                        `;
+                        
+                        // Add the table to the container
+                        itemsContainer.innerHTML = tableHTML;
+                        
+                        console.log("Added items table to container");
+                        
+                        // Add event listeners to checkboxes
+                        document.querySelectorAll('.select-item').forEach(checkbox => {
+                            checkbox.addEventListener('change', function() {
+                                const quantityInput = this.closest('tr').querySelector('.item-quantity');
+                                quantityInput.disabled = !this.checked;
+                                updateOrderSummary();
+                            });
+                        });
+                        
+                        // Add event listeners to quantity inputs
+                        document.querySelectorAll('.item-quantity').forEach(input => {
+                            input.addEventListener('input', updateOrderSummary);
+                        });
+                        
+                        console.log("Added event listeners to form elements");
+                        
+                    } else {
+                        console.error('Error from server:', data.error);
+                        itemsContainer.innerHTML = `<div class="alert alert-danger">Error loading inventory items: ${data.error || 'Unknown error'}</div>`;
+                    }
+                } catch (e) {
+                    console.error('Error parsing JSON response:', e);
+                    console.error('Raw response:', xhr.responseText);
+                    itemsContainer.innerHTML = '<div class="alert alert-danger">Error parsing server response. Check console for details.</div>';
+                }
             } else {
-                alert('Error: ' + (data.error || 'Failed to add order'));
+                console.error('Server returned error status:', xhr.status);
+                itemsContainer.innerHTML = `<div class="alert alert-danger">Server error (${xhr.status}). Please try again later.</div>`;
             }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('Error adding order');
+        };
+        
+        xhr.onerror = function() {
+            console.error('Network error occurred');
+            itemsContainer.innerHTML = '<div class="alert alert-danger">Network error. Please check your connection and try again.</div>';
+        };
+        
+        xhr.send();
+    }
+    
+    // Function to update the order summary
+    function updateOrderSummary() {
+        let totalItems = 0;
+        let totalAmount = 0;
+        
+        document.querySelectorAll('.select-item:checked').forEach(checkbox => {
+            const itemId = checkbox.getAttribute('data-id');
+            const price = parseFloat(checkbox.getAttribute('data-price'));
+            const quantityInput = document.querySelector(`.item-quantity[data-id="${itemId}"]`);
+            const quantity = parseInt(quantityInput.value);
+            
+            if (!isNaN(quantity) && quantity > 0) {
+                totalItems += quantity;
+                totalAmount += price * quantity;
+            }
         });
-    });
+        
+        // Update the order summary
+        const totalItemsEl = document.getElementById('total_items');
+        const totalAmountEl = document.getElementById('total_amount');
+        const orderTotalEl = document.getElementById('order_total');
+        
+        if (totalItemsEl) totalItemsEl.textContent = totalItems;
+        if (totalAmountEl) totalAmountEl.textContent = totalAmount.toFixed(2);
+        if (orderTotalEl) orderTotalEl.value = totalAmount.toFixed(2);
+    }
+    
+    // Handle order submission
+    const createOrderForm = document.getElementById('createOrderForm');
+    if (createOrderForm) {
+        console.log("Found createOrderForm, adding submit handler");
+        createOrderForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            console.log("Form submitted");
+            
+            // Get selected items
+            const selectedItems = [];
+            document.querySelectorAll('.select-item:checked').forEach(checkbox => {
+                const itemId = checkbox.getAttribute('data-id');
+                const price = parseFloat(checkbox.getAttribute('data-price'));
+                const quantityInput = document.querySelector(`.item-quantity[data-id="${itemId}"]`);
+                const quantity = parseInt(quantityInput.value);
+                
+                if (!isNaN(quantity) && quantity > 0) {
+                    selectedItems.push({
+                        item_id: itemId,
+                        quantity: quantity,
+                        price: price
+                    });
+                }
+            });
+            
+            console.log(`Selected ${selectedItems.length} items for order`);
+            
+            // Check if any items are selected
+            if (selectedItems.length === 0) {
+                alert('Please select at least one item for the order.');
+                return;
+            }
+            
+            // Prepare form data
+            const formData = new FormData();
+            formData.append('customer', document.getElementById('customer').value || 'Walk-in Customer');
+            
+            // Add items to form data
+            selectedItems.forEach(item => {
+                formData.append('order_items[]', item.item_id);
+                formData.append('quantities[]', item.quantity);
+                formData.append('prices[]', item.price);
+            });
+            
+            console.log("Sending order data to server");
+            
+            // Use XMLHttpRequest for better compatibility
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/add_order', true);
+            
+            xhr.onload = function() {
+                if (xhr.status === 200) {
+                    try {
+                        const data = JSON.parse(xhr.responseText);
+                        console.log(`Order creation response: success=${data.success}`);
+                        
+                        if (data.success) {
+                            alert('Order created successfully!');
+                            // Close the modal
+                            const modal = bootstrap.Modal.getInstance(document.getElementById('addOrderModal'));
+                            if (modal) {
+                                modal.hide();
+                            } else {
+                                // Fallback if bootstrap.Modal is not available
+                                document.getElementById('addOrderModal').classList.remove('show');
+                                document.getElementById('addOrderModal').style.display = 'none';
+                                document.body.classList.remove('modal-open');
+                                const backdrop = document.querySelector('.modal-backdrop');
+                                if (backdrop) backdrop.parentNode.removeChild(backdrop);
+                            }
+                            // Reload the page to show the new order
+                            window.location.reload();
+                        } else {
+                            alert('Error creating order: ' + (data.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        console.error('Error parsing response:', e);
+                        alert('Error processing server response');
+                    }
+                } else {
+                    console.error('Server returned error status:', xhr.status);
+                    alert(`Server error (${xhr.status}). Please try again.`);
+                }
+            };
+            
+            xhr.onerror = function() {
+                console.error('Network error occurred');
+                alert('Network error. Please check your connection and try again.');
+            };
+            
+            xhr.send(formData);
+        });
+    } else {
+        console.error("createOrderForm not found in the document");
+    }
 });
 
 document.getElementById('addItemBtn').addEventListener('click', function() {

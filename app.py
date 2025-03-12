@@ -13,44 +13,32 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from functools import wraps
 import atexit
 from reportlab.lib.units import inch
+import os
+import psycopg2
+import psycopg2.extras
+from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key'  # Replace with a strong secret key
+app.secret_key = os.getenv('SECRET_KEY')
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
 
-# Global variables
-users = {}  # This will store all user data
-
-def init_user_data(email, username, password):
-    """Initialize a new user with empty data structures"""
-    users[email] = {
-        'username': username,
-        'password': password,  # Make sure password is stored
-        'inventory': [],
-        'inventory_name': 'Inventory System',
-        'company_name': 'Inventory Dashboard',
-        'orders': [],
-        'history': [],
-        'categories': [],
-        'stocks': []
-    }
-    return users[email]
-
-def init_user_if_needed(email):
-    if email not in users:
-        users[email] = {
-            'username': session['username'],
-            'inventory': [],
-            'inventory_name': 'Inventory System',
-            'company_name': 'Inventory Dashboard',
-            'orders': [],
-            'history': [],
-            'categories': [],
-            'stocks': []
-        }
-    return users[email]
+# Database connection helper
+def get_db_connection():
+    conn = psycopg2.connect(
+        host=os.getenv('DB_HOST'),
+        database=os.getenv('DB_NAME'),
+        user=os.getenv('DB_USER'),
+        password=os.getenv('DB_PASSWORD'),
+        port=os.getenv('DB_PORT')
+    )
+    conn.autocommit = True
+    return conn
 
 # Login required decorator
 def login_required(f):
@@ -64,16 +52,29 @@ def login_required(f):
 # Helper functions - make sure these are the ONLY definitions of these functions
 def get_low_stock_products(user_email):
     """Get low stock products for specific user"""
-    user_data = users[user_email]
-    return [item for item in user_data['inventory'] if item.get('quantity', 0) < 10]
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    cur.execute("SELECT * FROM inventory WHERE user_id = %s AND quantity <= min_stock AND quantity > 0 ORDER BY quantity ASC LIMIT 5", (session['user_id'],))
+    low_stock_products = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return low_stock_products
 
 def get_category_data(user_email):
     """Get category data for specific user"""
-    user_data = users[user_email]
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    cur.execute("SELECT * FROM inventory WHERE user_id = %s", (session['user_id'],))
+    inventory = cur.fetchall()
+    
     categories = {}
     category_prices = {}
     
-    for item in user_data['inventory']:
+    for item in inventory:
         category = item.get('category', 'Uncategorized')
         quantity = item.get('quantity', 0)
         price = item.get('price', 0) * quantity
@@ -101,6 +102,9 @@ def get_category_data(user_email):
     price_data = [item[1] for item in sorted_categories]
     quantity_data = [categories[label] for label in labels]
     
+    cur.close()
+    conn.close()
+    
     return {
         'labels': labels,
         'price_data': price_data,
@@ -109,43 +113,33 @@ def get_category_data(user_email):
 
 def get_sales_data(user_email):
     """Get sales data for charts"""
-    user_data = users[user_email]
-    orders = user_data.get('orders', [])
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
     # Product-wise sales data
-    product_sales = {}
-    for order in orders:
-        for item in order.get('items', []):
-            name = item.get('name', 'Unknown')
-            quantity = item.get('quantity', 0)
-            price = item.get('price', 0) * quantity
-            
-            if name in product_sales:
-                product_sales[name]['quantity'] += quantity
-                product_sales[name]['revenue'] += price
-            else:
-                product_sales[name] = {'quantity': quantity, 'revenue': price}
-    
-    # Sort products by revenue
-    sorted_products = sorted(product_sales.items(), key=lambda x: x[1]['revenue'], reverse=True)
+    cur.execute("SELECT item_name, SUM(quantity) as total_quantity, SUM(price * quantity) as total_revenue FROM order_items WHERE user_id = %s GROUP BY item_name ORDER BY total_revenue DESC LIMIT 10", (session['user_id'],))
+    product_sales = cur.fetchall()
     
     # Today's sales data (by hour)
     today = datetime.now().date()
     hourly_sales = {i: {'revenue': 0, 'quantity': 0} for i in range(24)}  # Initialize all hours
     
-    for order in orders:
-        order_date = datetime.strptime(order.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
-        if order_date == today:
-            hour = datetime.strptime(order.get('date', ''), "%Y-%m-%d %H:%M:%S").hour
-            hourly_sales[hour]['revenue'] += order.get('total', 0)
-            for item in order.get('items', []):
-                hourly_sales[hour]['quantity'] += item.get('quantity', 0)
+    cur.execute("SELECT EXTRACT(HOUR FROM created_at) as hour, SUM(total) as total_revenue, SUM(quantity) as total_quantity FROM orders WHERE user_id = %s AND DATE(created_at) = %s GROUP BY hour", (session['user_id'], today))
+    today_sales = cur.fetchall()
+    
+    for sale in today_sales:
+        hour = int(sale['hour'])
+        hourly_sales[hour]['revenue'] = sale['total_revenue']
+        hourly_sales[hour]['quantity'] = sale['total_quantity']
+    
+    cur.close()
+    conn.close()
     
     return {
         'product': {
-            'labels': [item[0] for item in sorted_products[:10]],  # Top 10 products
-            'revenue_data': [item[1]['revenue'] for item in sorted_products[:10]],
-            'quantity_data': [item[1]['quantity'] for item in sorted_products[:10]]
+            'labels': [item['item_name'] for item in product_sales],
+            'revenue_data': [item['total_revenue'] for item in product_sales],
+            'quantity_data': [item['total_quantity'] for item in product_sales]
         },
         'today': {
             'labels': [f'{i:02d}:00' for i in range(24)],
@@ -156,7 +150,8 @@ def get_sales_data(user_email):
 
 def get_inventory_data(user_email):
     """Get both category and item-wise inventory data"""
-    user_data = users[user_email]
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
     # Initialize empty dictionaries
     categories = {}
@@ -165,7 +160,10 @@ def get_inventory_data(user_email):
     item_prices = {}
     
     # Process inventory data
-    for item in user_data.get('inventory', []):
+    cur.execute("SELECT * FROM inventory WHERE user_id = %s", (session['user_id'],))
+    inventory = cur.fetchall()
+    
+    for item in inventory:
         category = item.get('category', 'Uncategorized')
         name = item.get('name', 'Unknown')
         quantity = float(item.get('quantity', 0))
@@ -208,6 +206,9 @@ def get_inventory_data(user_email):
     item_price_data = [item[1] for item in sorted_items]
     item_quantity_data = [items[label] for label in item_labels]
     
+    cur.close()
+    conn.close()
+    
     return {
         'category': {
             'labels': category_labels,
@@ -223,32 +224,25 @@ def get_inventory_data(user_email):
 
 def get_forecasting_data(user_email):
     """Get forecasting data for specific user"""
-    user_data = users[user_email]
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
     forecast = {}
     
     # Calculate average daily sales for each product
-    for order in user_data['orders']:
-        order_date = datetime.strptime(order['date'], "%Y-%m-%d %H:%M:%S").date()
-        days_ago = (datetime.now().date() - order_date).days
-        if days_ago <= 30:  # Consider last 30 days
-            for item in order['items']:
-                name = item['name']
-                if name not in forecast:
-                    forecast[name] = {
-                        'total_quantity': 0,
-                        'days_with_sales': set()
-                    }
-                forecast[name]['total_quantity'] += item['quantity']
-                forecast[name]['days_with_sales'].add(order_date)
+    cur.execute("SELECT item_name, SUM(quantity) as total_quantity, COUNT(DISTINCT DATE(created_at)) as days_with_sales FROM order_items WHERE user_id = %s AND created_at >= NOW() - INTERVAL '30 days' GROUP BY item_name", (session['user_id'],))
+    sales_data = cur.fetchall()
     
-    # Calculate forecasted stock needs
-    forecast_data = {}
-    for name, data in forecast.items():
-        avg_daily_sales = data['total_quantity'] / max(len(data['days_with_sales']), 1)
-        forecast_data[name] = max(0, avg_daily_sales * 7)  # 7-day forecast
+    for sale in sales_data:
+        name = sale['item_name']
+        total_quantity = sale['total_quantity']
+        days_with_sales = sale['days_with_sales']
+        
+        avg_daily_sales = total_quantity / max(days_with_sales, 1)
+        forecast[name] = max(0, avg_daily_sales * 7)  # 7-day forecast
     
     # Sort by forecasted quantity
-    sorted_forecast = sorted(forecast_data.items(), 
+    sorted_forecast = sorted(forecast.items(), 
                            key=lambda x: x[1],
                            reverse=True)[:10]  # Top 10 items
     
@@ -258,6 +252,9 @@ def get_forecasting_data(user_email):
             'labels': ['No Data'],
             'data': [0]
         }
+    
+    cur.close()
+    conn.close()
     
     return {
         'labels': [item[0] for item in sorted_forecast],
@@ -272,8 +269,6 @@ def format_indian_currency(amount):
 
 def cleanup():
     """Function to clear in-memory data."""
-    global users
-    users.clear()
     print("Cleanup: Cleared all in-memory data.")
 
 # Register the cleanup function to be called on exit
@@ -293,11 +288,20 @@ def login():
         email = request.form['email']
         password = request.form['password']
         
-        user = users.get(email)
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         
-        if user and user.get('password') == password:
+        # Check if user exists
+        cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
+        
+        cur.close()
+        conn.close()
+        
+        if user and check_password_hash(user['password'], password):
             session['user_email'] = email
             session['username'] = user['username']
+            session['user_id'] = user['id']
             return redirect(url_for('dashboard'))
         else:
             flash('Invalid email or password', 'error')
@@ -308,22 +312,41 @@ def login():
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
+        username = request.form['username']
         email = request.form['email']
         password = request.form['password']
-        username = request.form['username']
+        company_name = request.form.get('company_name', '')
         
-        # Initialize user data with necessary keys
-        users[email] = {
-            'password': password,
-            'username': username,
-            'inventory': [],
-            'inventory_name': 'Inventory System',
-            'company_name': 'Inventory Dashboard',  # Add default company name
-            'orders': [],
-            'history': [],
-            'categories': [],
-            'stocks': []
-        }
+        # Hash the password
+        hashed_password = generate_password_hash(password)
+        
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Check if user already exists
+        cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+        if cur.fetchone():
+            cur.close()
+            conn.close()
+            flash('Email already registered', 'error')
+            return render_template('register.html')
+        
+        # Insert new user
+        cur.execute(
+            "INSERT INTO users (username, email, password, company_name) VALUES (%s, %s, %s, %s) RETURNING id",
+            (username, email, hashed_password, company_name)
+        )
+        user_id = cur.fetchone()[0]
+        
+        # Insert default settings
+        cur.execute(
+            "INSERT INTO settings (user_id, setting_key, setting_value) VALUES (%s, %s, %s)",
+            (user_id, 'currency', '₹')
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
         
         flash('Registration successful! Please log in.', 'success')
         return redirect(url_for('login'))
@@ -341,158 +364,269 @@ def logout():
 @app.route('/dashboard', methods=['GET', 'POST'])
 @login_required
 def dashboard():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
-    username = session['username']
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
-    if request.method == 'POST':
-        # Update inventory name
-        new_inventory_name = request.form.get('inventory_name')
-        if new_inventory_name:
-            user_data['inventory_name'] = new_inventory_name
-            flash('Inventory name updated successfully!', 'success')
+    user_id = session['user_id']
     
-    # Calculate dashboard metrics
-    inventory_count = len(user_data['inventory'])
-    total_sales = sum(float(order.get('total', 0)) for order in user_data['orders'])
-    low_stock_products = get_low_stock_products(user_email)
+    # Get inventory count
+    cur.execute("SELECT COUNT(*) FROM inventory WHERE user_id = %s", (user_id,))
+    inventory_count = cur.fetchone()[0]
     
-    # Get analytics data for mini charts
-    sales_mini_data = get_sales_mini_data(user_email)
-    inventory_mini_data = get_inventory_mini_data(user_email)
-    product_sales_data = get_product_sales_data(user_email)
-    today_sales_data = get_today_sales_data(user_email)
+    # Get categories count
+    cur.execute("SELECT COUNT(*) FROM categories WHERE user_id = %s", (user_id,))
+    categories_count = cur.fetchone()[0]
     
-    # Sort orders by date in descending order (newest first)
-    sorted_orders = sorted(
-        user_data['orders'],
-        key=lambda x: datetime.strptime(x['date'], "%Y-%m-%d %H:%M:%S"),
-        reverse=True
+    # Get orders count
+    cur.execute("SELECT COUNT(*) FROM orders WHERE user_id = %s", (user_id,))
+    orders_count = cur.fetchone()[0]
+    
+    # Get total stock value
+    cur.execute(
+        "SELECT COALESCE(SUM(quantity * price), 0) FROM inventory WHERE user_id = %s", 
+        (user_id,)
     )
+    stock_value = cur.fetchone()[0]
     
-    return render_template('dashboard.html', 
-                         inventory_count=inventory_count,
-                         total_sales=total_sales,
-                         company_name=user_data['company_name'],  # Use user-specific company name
-                         low_stock_products=low_stock_products,
-                         orders=sorted_orders[:5],  # Get only the 5 most recent orders
-                         sales_mini_data=sales_mini_data,
-                         inventory_mini_data=inventory_mini_data,
-                         product_sales_data=product_sales_data,
-                         today_sales_data=today_sales_data,
-                         username=username,
-                         inventory_name=user_data['inventory_name'])
+    # Get total sales (sum of all orders)
+    cur.execute(
+        "SELECT COALESCE(SUM(total), 0) FROM orders WHERE user_id = %s",
+        (user_id,)
+    )
+    total_sales = cur.fetchone()[0]
+    
+    # Get low stock items - RENAMED TO low_stock_products
+    cur.execute("""
+        SELECT * FROM inventory 
+        WHERE user_id = %s AND quantity <= min_stock AND quantity > 0
+        ORDER BY quantity ASC
+        LIMIT 5
+    """, (user_id,))
+    low_stock_products = cur.fetchall()  # Changed variable name from low_stock to low_stock_products
+    
+    # Get recent orders
+    cur.execute("""
+        SELECT o.id, o.order_number, o.customer, o.total, o.created_at,
+               to_char(o.created_at, 'YYYY-MM-DD') as formatted_date
+        FROM orders o 
+        WHERE o.user_id = %s 
+        ORDER BY o.created_at DESC 
+        LIMIT 5
+    """, (user_id,))
+    orders = cur.fetchall()
+    
+    # Get recent activities
+    cur.execute("""
+        SELECT *, to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') as formatted_date
+        FROM history 
+        WHERE user_id = %s 
+        ORDER BY created_at DESC 
+        LIMIT 10
+    """, (user_id,))
+    recent_activities = cur.fetchall()
+    
+    # Get company name
+    cur.execute("SELECT company_name FROM users WHERE id = %s", (user_id,))
+    user_result = cur.fetchone()
+    company_name = user_result['company_name'] if user_result else ''
+    
+    cur.close()
+    conn.close()
+    
+    return render_template(
+        'dashboard.html',
+        inventory_count=inventory_count,
+        categories_count=categories_count,
+        orders_count=orders_count,
+        stock_value=stock_value,
+        total_sales=total_sales,
+        low_stock_products=low_stock_products,  # Changed from low_stock to low_stock_products
+        orders=orders,
+        recent_activities=recent_activities,
+        company_name=company_name
+    )
 
 # Orders route (protected)
 @app.route('/orders')
 @login_required
 def orders_page():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
-    # Sort orders by date in descending order (newest first)
-    sorted_orders = sorted(
-        user_data['orders'],
-        key=lambda x: datetime.strptime(x['date'], "%Y-%m-%d %H:%M:%S"),
-        reverse=True
-    )
+    user_id = session['user_id']
     
-    return render_template('orders.html', 
-                         orders=sorted_orders,
-                         inventory=user_data['inventory'],
-                         company_name=user_data['company_name'])
+    # Get all orders
+    cur.execute("""
+        SELECT * FROM orders
+        WHERE user_id = %s
+        ORDER BY id DESC
+    """, (user_id,))
+    
+    orders_data = cur.fetchall()
+    
+    # Convert DictRow objects to regular dictionaries to allow adding keys
+    orders = []
+    for order_row in orders_data:
+        # Convert to regular dictionary
+        order = dict(order_row)
+        
+        # Get items for this order
+        cur.execute("""
+            SELECT oi.*, i.name as item_name, i.category_id, c.name as category_name
+            FROM order_items oi
+            JOIN inventory i ON oi.item_id = i.id
+            LEFT JOIN categories c ON i.category_id = c.id
+            WHERE oi.order_id = %s
+        """, (order['id'],))
+        
+        order_items = cur.fetchall()
+        
+        # Convert order items to regular dictionaries too
+        items = []
+        for item in order_items:
+            items.append(dict(item))
+        
+        # Add items to the order dictionary
+        order['items'] = items
+        orders.append(order)
+    
+    # Get currency setting
+    cur.execute("""
+        SELECT setting_value FROM settings
+        WHERE user_id = %s AND setting_key = 'currency'
+    """, (user_id,))
+    currency_result = cur.fetchone()
+    currency = currency_result['setting_value'] if currency_result else '₹'
+    
+    cur.close()
+    conn.close()
+    
+    return render_template('orders.html', orders=orders, currency=currency)
 
 # Add order route (protected)
 @app.route('/add_order', methods=['POST'])
 @login_required
 def add_order():
     try:
-        user_email = session['user_email']
-        user_data = users[user_email]
+        user_id = session['user_id']
         
-        # Get form data
-        customer = request.form.get('customer')
-        items = request.form.getlist('items')
-        quantities = request.form.getlist('quantities')
+        # Check if the request has JSON data or form data
+        if request.is_json:
+            data = request.get_json()
+        else:
+            # Handle form data
+            data = {
+                'customer': request.form.get('customer', 'Walk-in Customer'),
+                'order_items': request.form.getlist('order_items[]'),
+                'quantities': request.form.getlist('quantities[]'),
+                'prices': request.form.getlist('prices[]')
+            }
         
-        if not customer or not items:
-            return jsonify({
-                "success": False,
-                "message": "Invalid input data"
-            }), 400
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         
-        order_items = []
-        total = 0
+        # Generate an order number (format: ORD-YYYYMMDD-XXXX)
+        from datetime import datetime
+        today = datetime.now().strftime('%Y%m%d')
         
-        # Process each item in the order
-        for item_name, quantity in zip(items, quantities):
-            quantity = int(quantity)
+        # Get the latest order number for today to increment
+        cur.execute(
+            """
+            SELECT MAX(order_number) as max_number FROM orders 
+            WHERE order_number LIKE %s
+            """, 
+            (f'ORD-{today}-%',)
+        )
+        
+        result = cur.fetchone()
+        if result and result['max_number']:
+            # Extract the sequence number and increment
+            last_seq = int(result['max_number'].split('-')[-1])
+            new_seq = last_seq + 1
+        else:
+            # First order of the day
+            new_seq = 1
             
-            # Find the item in inventory
-            inventory_item = next(
-                (item for item in user_data['inventory'] if item['name'] == item_name),
-                None
+        # Format order number with leading zeros (4 digits)
+        order_number = f'ORD-{today}-{new_seq:04d}'
+        
+        # Calculate the total order amount
+        total = 0
+        for i in range(len(data['order_items'])):
+            quantity = int(data['quantities'][i])
+            price = float(data['prices'][i])
+            total += quantity * price
+        
+        # Insert the order with order_number, customer and total
+        cur.execute(
+            """
+            INSERT INTO orders 
+            (user_id, order_number, customer, total, status) 
+            VALUES (%s, %s, %s, %s, 'pending')
+            RETURNING id
+            """,
+            (user_id, order_number, data.get('customer', 'Walk-in Customer'), total)
+        )
+        order_id = cur.fetchone()['id']
+        
+        # Insert order items
+        for i in range(len(data['order_items'])):
+            item_id = int(data['order_items'][i])
+            quantity = int(data['quantities'][i])
+            price = float(data['prices'][i])
+            
+            # Get the item name from the inventory table
+            cur.execute(
+                """
+                SELECT name FROM inventory
+                WHERE id = %s AND user_id = %s
+                """,
+                (item_id, user_id)
             )
             
-            if not inventory_item:
-                return jsonify({
-                    "success": False,
-                    "message": f"Item '{item_name}' not found in inventory"
-                }), 404
+            item_result = cur.fetchone()
+            if not item_result:
+                raise Exception(f"Item with ID {item_id} not found")
+                
+            item_name = item_result['name']
             
-            if inventory_item['quantity'] < quantity:
-                return jsonify({
-                    "success": False,
-                    "message": f"Insufficient stock for '{item_name}'"
-                }), 400
+            # Insert order item with the item name
+            cur.execute(
+                """
+                INSERT INTO order_items
+                (order_id, item_id, item_name, quantity, price)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (order_id, item_id, item_name, quantity, price)
+            )
             
             # Update inventory quantity
-            inventory_item['quantity'] -= quantity
-            
-            # Add item to order
-            item_total = quantity * inventory_item['price']
-            order_items.append({
-                'name': item_name,
-                'quantity': quantity,
-                'price': inventory_item['price']
-            })
-            total += item_total
+            cur.execute(
+                """
+                UPDATE inventory
+                SET quantity = quantity - %s
+                WHERE id = %s AND user_id = %s
+                """,
+                (quantity, item_id, user_id)
+            )
         
-        # Find the highest order ID and increment by 1
-        max_order_id = max((order.get('id', 0) for order in user_data['orders']), default=0)
-        new_order_id = max_order_id + 1
-        
-        # Create new order
-        order = {
-            'id': new_order_id,
-            'customer': customer,
-            'items': order_items,
-            'total': total,
-            'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        # Add order to user's orders
-        user_data['orders'].append(order)
-        
-        # Add to history
-        user_data['history'].append({
-            'action': 'Order Created',
-            'order_id': order['id'],
-            'customer': customer,
-            'date': order['date']
-        })
+        conn.commit()
+        cur.close()
+        conn.close()
         
         return jsonify({
             "success": True,
-            "message": "Order added successfully",
-            "order": order
+            "order_id": order_id,
+            "order_number": order_number,
+            "total": total,
+            "message": "Order created successfully"
         })
         
     except Exception as e:
-        print(f"Error adding order: {e}")
+        print(f"Error creating order: {str(e)}")
         return jsonify({
             "success": False,
-            "message": str(e)
+            "error": str(e)
         }), 500
 
 # Protect all other routes
@@ -506,88 +640,161 @@ def require_login():
 # Inventory route
 @app.route('/inventory')
 @login_required
-def inventory_page():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
-    return render_template('inventory.html', 
-                         inventory=user_data['inventory'], 
-                         categories=user_data['categories'],
-                         company_name=user_data['company_name'])
-
-# Add item route
-@app.route('/add_item', methods=['POST'])
-@login_required
-def add_item():
+def inventory():
     try:
-        user_email = session['user_email']
-        user_data = init_user_if_needed(user_email)
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         
-        # Get form data
-        name = request.form.get('name')
-        if request.form.get('name') == 'new':
-            name = request.form.get('newItemName')
+        user_id = session['user_id']
         
-        category = request.form.get('category')
-        if category == 'new':
-            category = request.form.get('newCategory')
+        # Get inventory items
+        cur.execute("""
+            SELECT i.*, c.name as category_name 
+            FROM inventory i
+            LEFT JOIN categories c ON i.category_id = c.id
+            WHERE i.user_id = %s
+            ORDER BY i.name ASC
+        """, (user_id,))
+        items = cur.fetchall()
         
-        quantity = int(request.form.get('quantity', 0))
-        price = float(request.form.get('price', 0))
+        # Print for debugging
+        print(f"Retrieved {len(items)} inventory items for user {user_id}")
         
-        # Check if item already exists
-        existing_item = next(
-            (item for item in user_data['inventory'] if 
-             item['name'].lower() == name.lower() and 
-             item['category'].lower() == category.lower() and
-             item['price'] == price),
-            None
+        # Get categories for dropdown
+        cur.execute("""
+            SELECT * FROM categories
+            WHERE user_id = %s
+            ORDER BY name ASC
+        """, (user_id,))
+        categories = cur.fetchall()
+        
+        # Get currency setting
+        cur.execute("""
+            SELECT setting_value FROM settings
+            WHERE user_id = %s AND setting_key = 'currency'
+        """, (user_id,))
+        currency_result = cur.fetchone()
+        currency = currency_result['setting_value'] if currency_result else '₹'
+        
+        cur.close()
+        conn.close()
+        
+        # Convert DictRow objects to regular dictionaries to avoid template issues
+        items_list = [dict(item) for item in items]
+        categories_list = [dict(category) for category in categories]
+        
+        return render_template(
+            'inventory.html',
+            items=items_list,
+            categories=categories_list,
+            currency=currency
         )
-        
-        if existing_item:
-            # Update existing item quantity
-            existing_item['quantity'] += quantity
-            message = "Item quantity updated successfully"
-        else:
-            # Create new item
-            item = {
-                'id': len(user_data['inventory']) + 1,
-                'name': name,
-                'category': category,
-                'quantity': quantity,
-                'price': price,
-                'expiry_date': request.form.get('expiry_date'),
-                'date_added': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-            # Add to user's inventory
-            user_data['inventory'].append(item)
-            message = "Item added successfully"
-        
-        # Add to user's history
-        user_data['history'].append({
-            'action': 'Item Added/Updated',
-            'item': name,
-            'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-        
-        # Add category if it's new
-        if category not in user_data['categories']:
-            user_data['categories'].append(category)
-        
-        return jsonify({"success": True, "message": message})
     
     except Exception as e:
-        print(f"Error adding item: {e}")
-        return jsonify({"success": False, "message": str(e)}), 400
+        print(f"Error in inventory route: {str(e)}")
+        # Return an error message to help with debugging
+        return f"An error occurred: {str(e)}", 500
+
+# Create a separate route for category management
+@app.route('/manage_categories')
+@login_required
+def manage_categories():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    user_id = session['user_id']
+    
+    # Get all categories
+    cur.execute("""
+        SELECT * FROM categories
+        WHERE user_id = %s
+        ORDER BY name ASC
+    """, (user_id,))
+    categories = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return render_template(
+        'manage_categories.html',
+        categories=categories
+    )
+
+# Add a simple route to add categories
+@app.route('/add_category', methods=['POST'])
+@login_required
+def add_category():
+    try:
+        user_id = session['user_id']
+        name = request.form.get('name', '').strip()
+        
+        if not name:
+            return jsonify({
+                "success": False,
+                "message": "Category name is required"
+            })
+        
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Check for existing category
+        cur.execute("SELECT id FROM categories WHERE name = %s AND user_id = %s", (name, user_id))
+        existing = cur.fetchone()
+        
+        if existing:
+            cur.close()
+            conn.close()
+            return jsonify({
+                "success": True,
+                "id": existing['id'],
+                "message": "Category already exists"
+            })
+        
+        # Insert new category
+        cur.execute(
+            "INSERT INTO categories (name, user_id) VALUES (%s, %s) RETURNING id", 
+            (name, user_id)
+        )
+        new_id = cur.fetchone()['id']
+        conn.commit()
+        
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "id": new_id,
+            "message": "Category added successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error adding category: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": f"Error: {str(e)}"
+        })
 
 @app.route('/history')
 @login_required
 def history_page():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
-    return render_template('history.html', 
-                         history=user_data['history'], 
-                         company_name=user_data['company_name'])
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    user_id = session['user_id']
+    
+    # Get all history items
+    cur.execute("""
+        SELECT *, to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') as formatted_date
+        FROM history 
+        WHERE user_id = %s 
+        ORDER BY created_at DESC
+    """, (user_id,))
+    history_items = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return render_template('history.html', history=history_items)
 
 @app.route('/settings')
 @login_required
@@ -600,59 +807,201 @@ def settings_page():
 @app.route('/update_company_name', methods=['POST'])
 @login_required
 def update_company_name():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
-    user_data['company_name'] = request.form['company_name']
-    return jsonify({
-        "success": True, 
-        "message": "Company name updated successfully", 
-        "new_name": user_data['company_name']
-    })
+    try:
+        data = request.get_json()
+        new_name = data.get('company_name', '').strip()
+        
+        if not new_name:
+            return jsonify({
+                "success": False,
+                "message": "Company name cannot be empty"
+            }), 400
+        
+        user_id = session['user_id']
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Update company name
+        cur.execute(
+            "UPDATE users SET company_name = %s WHERE id = %s",
+            (new_name, user_id)
+        )
+        
+        # Add to history
+        cur.execute(
+            "INSERT INTO history (user_id, action, details) VALUES (%s, %s, %s)",
+            (user_id, 'Company Name Updated', f'Changed to {new_name}')
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "message": "Company name updated successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error updating company name: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": "Failed to update company name"
+        }), 500
 
 @app.route('/analytics')
 @login_required
 def analytics_page():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    user_id = session['user_id']
+    
+    # Get sales data by month
+    cur.execute("""
+        SELECT 
+            to_char(created_at, 'YYYY-MM') as month,
+            SUM(total) as revenue
+        FROM orders
+        WHERE user_id = %s
+        GROUP BY month
+        ORDER BY month ASC
+    """, (user_id,))
+    monthly_sales = cur.fetchall()
+    
+    # Format monthly sales for JSON chart data
+    sales_data = []
+    for sale in monthly_sales:
+        sales_data.append({
+            'month': sale['month'],
+            'revenue': float(sale['revenue']) if sale['revenue'] else 0
+        })
+    
+    # Get top selling products
+    cur.execute("""
+        SELECT 
+            i.name,
+            SUM(oi.quantity) as total_sold
+        FROM order_items oi
+        JOIN inventory i ON oi.item_id = i.id
+        JOIN orders o ON oi.order_id = o.id
+        WHERE o.user_id = %s
+        GROUP BY i.name
+        ORDER BY total_sold DESC
+        LIMIT 5
+    """, (user_id,))
+    top_products = cur.fetchall()
+    
+    # Get inventory value by category
+    cur.execute("""
+        SELECT 
+            COALESCE(c.name, 'Uncategorized') as category,
+            SUM(i.quantity * i.price) as value
+        FROM inventory i
+        LEFT JOIN categories c ON i.category_id = c.id
+        WHERE i.user_id = %s
+        GROUP BY c.name
+        ORDER BY value DESC
+    """, (user_id,))
+    category_values = cur.fetchall()
     
     # Get inventory data for charts
-    inventory_data = get_inventory_data(user_email)
+    cur.execute("""
+        SELECT 
+            i.name, 
+            i.quantity,
+            i.price,
+            COALESCE(c.name, 'Uncategorized') as category
+        FROM inventory i
+        LEFT JOIN categories c ON i.category_id = c.id
+        WHERE i.user_id = %s
+    """, (user_id,))
+    inventory_data = cur.fetchall()
     
-    # Get sales data
-    sales_data = get_sales_data(user_email)
+    # Convert to list of dicts for JSON serialization
+    inventory_data_list = []
+    for item in inventory_data:
+        inventory_data_list.append({
+            'name': item['name'],
+            'quantity': item['quantity'],
+            'price': float(item['price']),
+            'category': item['category']
+        })
     
-    # Get top products
-    top_products = get_top_products(user_email)
+    # Get currency setting
+    cur.execute("""
+        SELECT setting_value FROM settings
+        WHERE user_id = %s AND setting_key = 'currency'
+    """, (user_id,))
+    currency_result = cur.fetchone()
+    currency = currency_result['setting_value'] if currency_result else '₹'
     
-    return render_template('analytics.html',
-                         inventory_data=inventory_data,
-                         sales_data=sales_data,
-                         top_products=top_products,
-                         company_name=user_data.get('company_name', 'Inventory Dashboard'))
+    cur.close()
+    conn.close()
+    
+    return render_template(
+        'analytics.html',
+        monthly_sales=monthly_sales,
+        top_products=top_products,
+        category_values=category_values,
+        inventory_data=inventory_data_list,
+        sales_data=sales_data,
+        currency=currency
+    )
 
-def get_sales_mini_data(user_email):
+def get_sales_mini_data(user_id):
     """Get recent sales data for mini chart"""
-    user_data = users[user_email]
-    recent_orders = sorted(user_data['orders'], 
-                         key=lambda x: datetime.strptime(x['date'], "%Y-%m-%d %H:%M:%S"),
-                         reverse=True)[:7]
-    data = [order.get('total', 0) for order in recent_orders]
-    labels = [datetime.strptime(order['date'], "%Y-%m-%d %H:%M:%S").strftime("%d/%m")
-             for order in recent_orders]
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    # Get recent orders sorted by date
+    cur.execute("""
+        SELECT id, total, created_at
+        FROM orders 
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+        LIMIT 7
+    """, (user_id,))
+    recent_orders = cur.fetchall()
+    
+    # Format data for chart
+    data = [float(order['total']) for order in recent_orders]
+    labels = [order['created_at'].strftime("%d/%m") for order in recent_orders]
+    
+    cur.close()
+    conn.close()
+    
     return {
         'labels': labels,
         'data': data
     }
 
-def get_inventory_mini_data(user_email):
+def get_inventory_mini_data(user_id):
     """Get inventory data for mini chart"""
-    user_data = users[user_email]
-    recent_items = sorted(user_data['inventory'], 
-                        key=lambda x: x.get('quantity', 0),
-                        reverse=True)[:7]
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    # Get top items by quantity
+    cur.execute("""
+        SELECT name, quantity
+        FROM inventory
+        WHERE user_id = %s
+        ORDER BY quantity DESC
+        LIMIT 7
+    """, (user_id,))
+    top_items = cur.fetchall()
+    
+    # Format data for chart
+    labels = [item['name'] for item in top_items]
+    data = [item['quantity'] for item in top_items]
+    
+    cur.close()
+    conn.close()
+    
     return {
-        'labels': [item.get('name', '') for item in recent_items],
-        'data': [item.get('quantity', 0) for item in recent_items]
+        'labels': labels,
+        'data': data
     }
 
 def get_product_sales_data(user_email):
@@ -722,40 +1071,6 @@ def get_top_products(user_email):
     top_products.sort(key=lambda x: x['revenue'], reverse=True)
     
     return top_products[:5]  # Return top 5 products
-
-@app.route('/stream')
-@login_required
-def stream():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
-    def event_stream():
-        while True:
-            try:
-                with app.app_context():
-                    with app.test_request_context():
-                        if 'user_email' in session:
-                            user_email = session['user_email']
-                            user_data = users.get(user_email, {
-                                'inventory': [],
-                                'orders': [],
-                                'stocks': []
-                            })
-                            
-                            data = {
-                                'event': 'update',
-                                'inventory_count': len(user_data['inventory']),
-                                'order_count': len(user_data['orders']),
-                                'total_sales': sum(order.get('total', 0) for order in user_data['orders']),
-                                'low_stock_products': get_low_stock_products(user_email)
-                            }
-                            
-                            yield f"data: {json.dumps(data)}\n\n"
-                time.sleep(5)
-            except Exception as e:
-                print(f"Stream error: {e}")
-                time.sleep(5)
-    
-    return Response(event_stream(), mimetype="text/event-stream")
 
 @app.route('/generate_report')
 @login_required
@@ -928,468 +1243,342 @@ def generate_report():
         mimetype='application/pdf'
     )
 
-@app.route('/get_product/<int:id>')
-def get_product(id):
-    product = next((item for item in inventory if item['id'] == id), None)
-    if product:
-        return jsonify(product)
-    return jsonify({"error": "Product not found"}), 404
-
-@app.route('/edit_product', methods=['POST'])
-def edit_product():
-    try:
-        product_id = int(request.form['id'])
-        product = next((item for item in inventory if item['id'] == product_id), None)
-        if not product:
-            return jsonify({"success": False, "message": "Product not found"}), 404
-        
-        product['name'] = request.form['name']
-        product['quantity'] = int(request.form['quantity'])
-        product['category'] = request.form['category']
-        
-        return jsonify({"success": True, "message": "Product updated successfully"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 400
-
-@app.route('/delete_product/<int:id>', methods=['POST'])
-def delete_product(id):
-    global inventory
-    inventory = [item for item in inventory if item['id'] != id]
-    return jsonify({"success": True, "message": "Product deleted successfully"})
-
-@app.route('/get_order/<order_index>')
+@app.route('/get_item/<int:item_id>', methods=['GET'])
 @login_required
-def get_order(order_index):
+def get_item(item_id):
     try:
-        user_email = session['user_email']
-        user_data = users[user_email]
+        user_id = session['user_id']
         
-        # Sort orders by date first
-        sorted_orders = sorted(
-            user_data['orders'],
-            key=lambda x: datetime.strptime(x['date'], "%Y-%m-%d %H:%M:%S"),
-            reverse=True
-        )
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         
-        index = int(order_index)
-        if 0 <= index < len(sorted_orders):
-            order = sorted_orders[index].copy()  # Create a copy to modify
-            
-            try:
-                # Convert the stored date string to datetime object
-                order_datetime = datetime.strptime(order['date'], "%Y-%m-%d %H:%M:%S")
-                # Format for datetime-local input
-                order['date'] = order_datetime.strftime("%Y-%m-%dT%H:%M")
-            except ValueError:
-                # If there's an error parsing the date, use current time
-                order['date'] = datetime.now().strftime("%Y-%m-%dT%H:%M")
-            
-            return jsonify({
-                'success': True,
-                'order': order
-            })
-        else:
-            return jsonify({'success': False, 'error': 'Order not found'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/edit_order/<order_index>', methods=['POST'])
-@login_required
-def edit_order(order_index):
-    try:
-        user_email = session['user_email']
-        user_data = users[user_email]
+        # Get item with category name
+        cur.execute("""
+            SELECT i.*, c.name as category_name 
+            FROM inventory i
+            LEFT JOIN categories c ON i.category_id = c.id
+            WHERE i.id = %s AND i.user_id = %s
+        """, (item_id, user_id))
         
-        # Sort orders by date first
-        sorted_orders = sorted(
-            user_data['orders'],
-            key=lambda x: datetime.strptime(x['date'], "%Y-%m-%d %H:%M:%S"),
-            reverse=True
-        )
+        item = cur.fetchone()
         
-        index = int(order_index)
-        if 0 <= index < len(sorted_orders):
-            # Find the original order in the unsorted list
-            old_order = sorted_orders[index]
-            original_index = user_data['orders'].index(old_order)
-            
-            # Return old items to inventory
-            for item in old_order.get('items', []):
-                item_name = item.get('name')
-                item_quantity = item.get('quantity', 0)
-                for inv_item in user_data['inventory']:
-                    if inv_item['name'] == item_name:
-                        inv_item['quantity'] += item_quantity
-                        break
-            
-            # Get new order data
-            customer = request.form.get('customer')
-            order_date = request.form.get('order_date')
-            items = json.loads(request.form.get('items', '[]'))
-            
-            if not customer or not items or not order_date:
-                return jsonify({'success': False, 'error': 'Missing required fields'})
-            
-            # Convert date string to datetime and format
-            try:
-                order_datetime = datetime.strptime(order_date, '%Y-%m-%dT%H:%M')
-                formatted_date = order_datetime.strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError as e:
-                return jsonify({'success': False, 'error': f'Invalid date format: {str(e)}'})
-            
-            total = 0
-            new_items = []
-            for item in items:
-                quantity = int(item['quantity'])
-                price = float(item['price'])
-                item_total = quantity * price
-                
-                inventory_item = next(
-                    (inv_item for inv_item in user_data['inventory'] if inv_item['name'] == item['name']),
-                    None
-                )
-                
-                if not inventory_item:
-                    return jsonify({'success': False, 'error': f'Item not found: {item["name"]}'})
-                
-                if inventory_item['quantity'] < quantity:
-                    return jsonify({'success': False, 'error': f'Insufficient quantity for {item["name"]}'})
-                
-                inventory_item['quantity'] -= quantity
-                total += item_total
-                
-                new_items.append({
-                    'name': item['name'],
-                    'quantity': quantity,
-                    'price': price
-                })
-            
-            # Update order at its original position
-            user_data['orders'][original_index] = {
-                'customer': customer,
-                'items': new_items,
-                'total': total,
-                'date': formatted_date
-            }
-            
-            return jsonify({'success': True})
-        else:
-            return jsonify({'success': False, 'error': 'Order not found'})
-            
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/get_item/<int:id>')
-@login_required
-def get_item(id):
-    user_email = session['user_email']
-    user_data = users[user_email]
-    
-    item = next((item for item in user_data['inventory'] if item['id'] == id), None)
-    if item:
-        return jsonify(item)
-    return jsonify({"error": "Item not found"}), 404
-
-@app.route('/edit_item', methods=['POST'])
-@login_required
-def edit_item():
-    try:
-        user_email = session['user_email']
-        user_data = init_user_if_needed(user_email)
+        cur.close()
+        conn.close()
         
-        item_id = int(request.form['id'])
-        item = next((item for item in user_data['inventory'] if item['id'] == item_id), None)
         if not item:
-            return jsonify({"success": False, "message": "Item not found"}), 404
+            return jsonify({
+                "success": False,
+                "message": "Item not found or access denied"
+            }), 404
         
-        item['name'] = request.form['name']
-        item['category'] = request.form['category']
-        item['quantity'] = int(request.form['quantity'])
-        item['price'] = float(request.form['price'])
-        item['expiry_date'] = request.form['expiry_date'] if request.form['expiry_date'] else None
-        
-        # Add to user's history
-        user_data['history'].append({
-            'action': 'Item Updated',
-            'item': item['name'],
-            'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-        
-        return jsonify({"success": True, "message": "Item updated successfully"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 400
-
-@app.route('/delete_item/<int:id>', methods=['POST'])
-@login_required
-def delete_item(id):
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
-    
-    item = next((item for item in user_data['inventory'] if item['id'] == id), None)
-    if item:
-        user_data['inventory'] = [i for i in user_data['inventory'] if i['id'] != id]
-        
-        # Add to user's history
-        user_data['history'].append({
-            'action': 'Item Deleted',
-            'item': item['name'],
-            'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-        
-        return jsonify({"success": True, "message": "Item deleted successfully"})
-    return jsonify({"success": False, "message": "Item not found"}), 404
-
-@app.route('/stocks', methods=['GET', 'POST'])
-@login_required
-def stocks():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
-    username = session['username']
-    
-    if request.method == 'POST':
-        stock = {
-            'symbol': request.form['symbol'],
-            'quantity': int(request.form['quantity'])
-        }
-        users[user_email]['stocks'].append(stock)
-    
-    # Get user-specific data
-    inventory_count = len(user_data['inventory'])
-    total_sales = sum(order['total'] for order in user_data['orders'])
-    low_stock_products = get_low_stock_products(user_email)
-    
-    return render_template('dashboard.html', 
-                         inventory_count=inventory_count,
-                         total_sales=total_sales,
-                         company_name=user_data['company_name'],
-                         low_stock_products=low_stock_products,
-                         orders=user_data['orders'],
-                         username=username)
-
-@app.route('/delete_order/<order_index>', methods=['POST'])
-@login_required
-def delete_order(order_index):
-    try:
-        user_email = session['user_email']
-        user_data = users[user_email]
-        
-        # Convert order_index to integer
-        index = int(order_index)
-        
-        # Check if order exists
-        if 0 <= index < len(user_data.get('orders', [])):
-            # Get the order to be deleted
-            order = user_data['orders'][index]
-            
-            # Return items to inventory
-            for item in order.get('items', []):
-                item_name = item.get('name')
-                item_quantity = item.get('quantity', 0)
-                
-                # Find matching inventory item
-                for inv_item in user_data.get('inventory', []):
-                    if inv_item['name'] == item_name:
-                        inv_item['quantity'] += item_quantity
-                        break
-            
-            # Remove the order
-            user_data['orders'].pop(index)
-            return jsonify({'success': True})
-        else:
-            return jsonify({'success': False, 'error': 'Order not found'})
-            
-    except ValueError:
-        return jsonify({'success': False, 'error': 'Invalid order index'})
-    except Exception as e:
-        print(f"Error deleting order: {str(e)}")  # Add logging
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/get_daily_sales/<date>')
-@login_required
-def get_daily_sales(date):
-    try:
-        user_email = session['user_email']
-        user_data = users[user_email]
-        orders = user_data.get('orders', [])
-        
-        # Convert date string to datetime
-        selected_date = datetime.strptime(date, '%Y-%m-%d').date()
-        
-        # Initialize hourly sales
-        hourly_sales = {i: 0 for i in range(24)}
-        
-        # Calculate sales for selected date
-        for order in orders:
-            order_datetime = datetime.strptime(order.get('date', ''), "%Y-%m-%d %H:%M:%S")
-            if order_datetime.date() == selected_date:
-                hour = order_datetime.hour
-                hourly_sales[hour] += order.get('total', 0)
+        # Convert to dict for JSON serialization
+        item_dict = dict(item)
         
         return jsonify({
-            'success': True,
-            'sales': {
-                'labels': [f'{i:02d}:00' for i in range(24)],
-                'data': list(hourly_sales.values())
-            }
+            "success": True,
+            "item": item_dict
         })
+        
     except Exception as e:
+        print(f"Error retrieving item: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": "Failed to retrieve item details"
+        }), 500
+
+@app.route('/edit_item/<int:item_id>', methods=['POST'])
+@login_required
+def edit_item(item_id):
+    try:
+        user_id = session['user_id']
+        
+        # Get form data
+        name = request.form.get('name')
+        description = request.form.get('description', '')
+        category_id = request.form.get('category_id')
+        quantity = request.form.get('quantity', 0)
+        price = request.form.get('price', 0)
+        cost = request.form.get('cost', 0)
+        sku = request.form.get('sku', '')
+        barcode = request.form.get('barcode', '')
+        min_stock = request.form.get('min_stock', 0)
+        max_stock = request.form.get('max_stock', 0)
+        
+        # Validate required fields
+        if not name:
+            return jsonify({
+                "success": False,
+                "message": "Item name is required"
+            }), 400
+            
+        # Convert numeric values
+        if category_id and category_id.isdigit():
+            category_id = int(category_id)
+        else:
+            category_id = None
+            
+        quantity = int(quantity) if quantity else 0
+        price = float(price) if price else 0
+        cost = float(cost) if cost else 0
+        min_stock = int(min_stock) if min_stock else 0
+        max_stock = int(max_stock) if max_stock else 0
+        
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Check if item exists and belongs to user
+        cur.execute("SELECT * FROM inventory WHERE id = %s AND user_id = %s", (item_id, user_id))
+        item = cur.fetchone()
+        
+        if not item:
+            cur.close()
+            conn.close()
+            return jsonify({
+                "success": False,
+                "message": "Item not found or access denied"
+            }), 404
+            
+        # Check if another item with the same name exists (excluding this one)
+        cur.execute("SELECT id FROM inventory WHERE name = %s AND user_id = %s AND id != %s", 
+                   (name, user_id, item_id))
+        existing = cur.fetchone()
+        if existing:
+            cur.close()
+            conn.close()
+            return jsonify({
+                "success": False,
+                "message": f"Another item with the name '{name}' already exists"
+            }), 400
+        
+        # Get old quantity for history
+        old_quantity = item['quantity']
+        quantity_change = quantity - old_quantity
+        
+        # Update item
+        cur.execute("""
+            UPDATE inventory 
+            SET name = %s, description = %s, category_id = %s, quantity = %s, 
+                price = %s, cost = %s, sku = %s, barcode = %s, 
+                min_stock = %s, max_stock = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND user_id = %s
+            RETURNING id
+        """, (name, description, category_id, quantity, price, cost, sku, barcode, 
+              min_stock, max_stock, item_id, user_id))
+        
+        # Add to history if quantity changed
+        if quantity_change != 0:
+            action = 'Stock Increased' if quantity_change > 0 else 'Stock Decreased'
+            cur.execute(
+                "INSERT INTO history (user_id, action, item, details, quantity) VALUES (%s, %s, %s, %s, %s)",
+                (user_id, action, name, f"{action} for {name}", abs(quantity_change))
+            )
+        
+        # Add general edit to history
+        cur.execute(
+            "INSERT INTO history (user_id, action, item, details) VALUES (%s, %s, %s, %s)",
+            (user_id, 'Item Updated', name, f"Updated item details for {name}")
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "message": f"Item '{name}' has been updated successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error updating item: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": "An error occurred while updating the item"
+        }), 500
+
+@app.route('/delete_item/<int:item_id>', methods=['POST'])
+@login_required
+def delete_item(item_id):
+    try:
+        user_id = session['user_id']
+        
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Check if item exists and belongs to user
+        cur.execute("SELECT name FROM inventory WHERE id = %s AND user_id = %s", (item_id, user_id))
+        item = cur.fetchone()
+        
+        if not item:
+            cur.close()
+            conn.close()
+            return jsonify({
+                "success": False,
+                "message": "Item not found or access denied"
+            }), 404
+            
+        item_name = item['name']
+        
+        # Check if item is used in any orders
+        cur.execute("SELECT id FROM order_items WHERE item_id = %s LIMIT 1", (item_id,))
+        used_in_order = cur.fetchone()
+        
+        if used_in_order:
+            # Instead of preventing deletion, just set item_id to NULL in order_items
+            cur.execute("UPDATE order_items SET item_id = NULL WHERE item_id = %s", (item_id,))
+        
+        # Delete the item
+        cur.execute("DELETE FROM inventory WHERE id = %s AND user_id = %s", (item_id, user_id))
+        
+        # Add to history
+        cur.execute(
+            "INSERT INTO history (user_id, action, item, details) VALUES (%s, %s, %s, %s)",
+            (user_id, 'Item Deleted', item_name, f"Deleted item: {item_name}")
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "message": f"Item '{item_name}' has been deleted successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error deleting item: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": "An error occurred while deleting the item"
+        }), 500
+
+@app.route('/stream')
+@login_required
+def stream():
+    def generate():
+        yield "data: {\"message\": \"Connected to event stream\"}\n\n"
+        # In a real application, you would have more complex event generation
+    
+    response = app.response_class(
+        generate(),
+        mimetype='text/event-stream'
+    )
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'
+    return response
+
+@app.route('/add_item', methods=['POST'])
+@login_required
+def add_item():
+    try:
+        user_id = session['user_id']
+        name = request.form.get('name')
+        
+        # Handle the special case when "Add New Item" is selected
+        if name == 'new':
+            name = request.form.get('newItemName')
+        
+        # Get other form data
+        category_id = request.form.get('category_id')
+        category = request.form.get('category')
+        quantity = request.form.get('quantity')
+        price = request.form.get('price')
+        
+        # Check if we need to create a new category
+        if category and not category_id:
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            
+            # Check if category already exists
+            cur.execute("SELECT id FROM categories WHERE name = %s AND user_id = %s", 
+                       (category, user_id))
+            existing_category = cur.fetchone()
+            
+            if existing_category:
+                category_id = existing_category['id']
+            else:
+                # Create new category
+                cur.execute(
+                    "INSERT INTO categories (name, user_id) VALUES (%s, %s) RETURNING id", 
+                    (category, user_id)
+                )
+                category_id = cur.fetchone()['id']
+                conn.commit()
+            
+            cur.close()
+            conn.close()
+        
+        # Now insert the inventory item
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute(
+            """
+            INSERT INTO inventory 
+            (name, category_id, quantity, price, user_id) 
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (name, category_id, quantity, price, user_id)
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "message": "Item added successfully"
+        })
+        
+    except Exception as e:
+        print(f"Error adding item: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        })
+
+@app.route('/get_inventory_items')
+@login_required
+def get_inventory_items():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        user_id = session['user_id']
+        
+        # Get inventory items with their categories
+        cur.execute("""
+            SELECT i.id, i.name, i.quantity, i.price, 
+                   c.name as category_name
+            FROM inventory i
+            LEFT JOIN categories c ON i.category_id = c.id
+            WHERE i.user_id = %s AND i.quantity > 0
+            ORDER BY i.name ASC
+        """, (user_id,))
+        
+        items = cur.fetchall()
+        
+        # Convert DictRow objects to regular dictionaries
+        items_list = []
+        for item in items:
+            items_list.append({
+                'id': item['id'],
+                'name': item['name'],
+                'quantity': item['quantity'],
+                'price': item['price'],
+                'category_name': item['category_name'] or 'Uncategorized'
+            })
+        
+        cur.close()
+        conn.close()
+        
+        return jsonify({'success': True, 'items': items_list})
+    
+    except Exception as e:
+        print(f"Error fetching inventory items: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
 
-@app.route('/download_sales_report')
-@login_required
-def download_sales_report():
-    user_email = session['user_email']
-    user_data = init_user_if_needed(user_email)
-    
-    view = request.args.get('view')
-    report_type = request.args.get('type')
-    date = request.args.get('date')
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
-
-    # Get and sort orders based on parameters
-    if report_type == 'overall':
-        orders = sorted(user_data['orders'], key=lambda x: x['date'], reverse=True)
-        filename = "overall_sales_report.pdf"
-    elif report_type == 'range' and start_date and end_date:
-        orders = [order for order in user_data['orders'] 
-                 if start_date <= order['date'].split()[0] <= end_date]
-        orders.sort(key=lambda x: x['date'], reverse=True)
-        filename = f"sales_report_{start_date}_to_{end_date}.pdf"
-    elif view == 'today' and date:
-        orders = [order for order in user_data['orders'] 
-                 if order['date'].startswith(date)]
-        orders.sort(key=lambda x: x['date'], reverse=True)
-        filename = f"sales_report_{date}.pdf"
-    elif view == 'product':
-        orders = sorted(user_data['orders'], key=lambda x: x['date'], reverse=True)
-        filename = "product_sales_report.pdf"
-    else:
-        return "Invalid parameters", 400
-
-    # Create PDF
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    elements = []
-
-    # Styles
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=16,
-        spaceAfter=30
-    )
-
-    # Add title and date info
-    elements.append(Paragraph(f"Sales Report - {user_data.get('company_name', 'Company')}", title_style))
-    elements.append(Spacer(1, 12))
-
-    if report_type == 'range':
-        date_info = f"Period: {start_date} to {end_date}"
-    elif view == 'today':
-        date_info = f"Date: {date}"
-    else:
-        date_info = "Overall Sales Report"
-    elements.append(Paragraph(date_info, styles["Normal"]))
-    elements.append(Spacer(1, 20))
-
-    # Prepare data
-    if view == 'product':
-        # Product-wise summary with date range info
-        product_sales = {}
-        date_range = {'earliest': None, 'latest': None}
-        
-        for order in orders:
-            order_date = datetime.strptime(order['date'], "%Y-%m-%d %H:%M:%S")
-            
-            # Update date range
-            if date_range['earliest'] is None or order_date < date_range['earliest']:
-                date_range['earliest'] = order_date
-            if date_range['latest'] is None or order_date > date_range['latest']:
-                date_range['latest'] = order_date
-                
-            for item in order['items']:
-                name = item['name']
-                if name not in product_sales:
-                    product_sales[name] = {'quantity': 0, 'revenue': 0}
-                product_sales[name]['quantity'] += item['quantity']
-                product_sales[name]['revenue'] += item['price'] * item['quantity']
-
-        # Add date range info for product view
-        if date_range['earliest'] and date_range['latest']:
-            elements.append(Paragraph(
-                f"Period: {date_range['earliest'].strftime('%Y-%m-%d')} to {date_range['latest'].strftime('%Y-%m-%d')}", 
-                styles["Normal"]
-            ))
-            elements.append(Spacer(1, 12))
-
-        table_data = [['Product', 'Quantity Sold', 'Revenue']]
-        for product, data in sorted(product_sales.items(), key=lambda x: x[1]['revenue'], reverse=True):
-            table_data.append([
-                product,
-                str(data['quantity']),
-                f"₹{data['revenue']:,.2f}"
-            ])
-    else:
-        # Order-wise details
-        table_data = [['Order ID', 'Date & Time', 'Customer', 'Items', 'Total']]
-        for i, order in enumerate(orders, 1):
-            items_str = "\n".join([f"{item['name']} (x{item['quantity']})" for item in order['items']])
-            # Parse and format the date for better readability
-            order_date = datetime.strptime(order['date'], "%Y-%m-%d %H:%M:%S")
-            formatted_date = order_date.strftime("%Y-%m-%d %I:%M %p")
-            
-            table_data.append([
-                f"#{i:05d}",
-                formatted_date,
-                order['customer'],
-                items_str,
-                f"₹{order['total']:,.2f}"
-            ])
-
-    # Create table with adjusted column widths
-    if view == 'product':
-        col_widths = [250, 100, 150]  # Adjusted for product view
-    else:
-        col_widths = [60, 120, 100, 200, 80]  # Adjusted for order view
-    
-    table = Table(table_data, repeatRows=1, colWidths=col_widths)
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 12),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.white),
-        ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 10),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        # Align specific columns
-        ('ALIGN', (3, 1), (3, -1), 'LEFT'),  # Items column left-aligned
-        ('ALIGN', (-1, 1), (-1, -1), 'RIGHT'),  # Total column right-aligned
-    ]))
-    elements.append(table)
-    elements.append(Spacer(1, 20))
-
-    # Add summary
-    total_sales = sum(order['total'] for order in orders)
-    elements.append(Paragraph(f"Total Sales: ₹{total_sales:,.2f}", styles["Heading3"]))
-    elements.append(Paragraph(f"Number of Orders: {len(orders)}", styles["Normal"]))
-
-    # Generate PDF
-    doc.build(elements)
-    buffer.seek(0)
-
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name=filename,
-        mimetype='application/pdf'
-    )
-
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=os.getenv('DEBUG', 'True') == 'True', 
+            host=os.getenv('HOST', '0.0.0.0'),
+            port=int(os.getenv('PORT', 5000)))
 

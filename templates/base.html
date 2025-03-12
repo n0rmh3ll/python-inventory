@@ -237,9 +237,9 @@
                             </a>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link {% if request.path == url_for('inventory_page') %}active{% endif %}" href="{{ url_for('inventory_page') }}">
-                                <i data-lucide="box"></i>
-                                Inventory
+                            <a class="nav-link {% if request.path == url_for('inventory') %}active{% endif %}" href="{{ url_for('inventory') }}">
+                                <i data-lucide="package" class="icon"></i>
+                                <span>Inventory</span>
                             </a>
                         </li>
                         <li class="nav-item">
